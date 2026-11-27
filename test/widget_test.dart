@@ -1,30 +1,36 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:yara_academy/main.dart';
+import 'package:yara_academy/core/lesson_alert.dart';
+import 'package:yara_academy/screens/study_room_art.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const YaraApp());
-
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('lesson alert validates its target before opening a screen', () {
+    expect(LessonAlert.fromPush({}), isNull);
+    expect(LessonAlert.fromPush({'courseId': 'course', 'type': 'teacher_ring'}), isNull);
+    final alert = LessonAlert.fromPush({
+      'courseId': 'course', 'type': 'teacher_ring', 'studentId': 'student',
+      'lessonKey': 'round:one', 'sentAt': '2026-11-25T08:00:00.000Z',
+    });
+    expect(alert, isNotNull);
+    expect(alert!.forTeacher, isTrue);
+    expect(alert.courseId, 'course');
+  });
+  test('shared room seating limits and avatars', () {
+    for (final decor in ['library', 'rooftop', 'ocean']) {
+      expect(studyDecorCapacity(decor), 6);
+    }
+    for (final decor in ['garden', 'space']) {
+      expect(studyDecorCapacity(decor), 12);
+    }
+    expect(studyAvatars.length, 8);
+  });
+  testWidgets('all shared avatars render in both seat directions', (tester) async {
+    for (final id in studyAvatars.keys) {
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: Row(children: [
+        StudyAvatar(id, size: 64, writingPage: const Offset(85, 60)),
+        StudyAvatar(id, size: 64, facesLeft: true, writingPage: const Offset(85, 60)),
+      ]))));
+      expect(tester.takeException(), isNull, reason: id);
+    }
   });
 }

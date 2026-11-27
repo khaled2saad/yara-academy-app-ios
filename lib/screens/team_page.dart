@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'tour.dart';
+import 'teacher_accounting.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
@@ -199,6 +200,7 @@ class _TeamPageState extends State<TeamPage> {
     final active = u['isActive'] == true;
     final used = u['codeUsed'] == true;
     return YaCard(
+      onTap: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => TeacherAccountingPage(teacherId: u['id'] as String, teacherName: u['fullName'] as String))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Row(children: [
           Expanded(child: Text(u['fullName'] as String? ?? '', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17))),
@@ -215,6 +217,10 @@ class _TeamPageState extends State<TeamPage> {
             u['codeUsedApp'] == true ? const Pill('📱 استُخدم', bg: Color(0xFFEDF1F3), fg: Ya.muted) : Pill.ok('📱 متاح'),
           ]),
         Text('${u['coursesCount'] ?? 0} كورس', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        TextButton.icon(
+          onPressed: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => TeacherAccountingPage(teacherId: u['id'] as String, teacherName: u['fullName'] as String))),
+          icon: const Icon(Icons.menu_book_outlined), label: const Text('الكورسات وحساب الحصص'),
+        ),
         const SizedBox(height: 10),
         Row(children: [
           Expanded(child: OutlinedButton(onPressed: () => _do(() async { await _api.patch('/staff/${u['id']}', body: {'isActive': !active}); await _load(); }), child: Text(active ? 'إيقاف' : 'تفعيل'))),

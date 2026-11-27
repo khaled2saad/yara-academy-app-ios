@@ -20,20 +20,34 @@ import 'home.dart' show openSupportWith;
 import 'session_widgets.dart';
 
 /// Opens a Zoom link; tries several ways and falls back to copying it.
-Future<void> openZoomLink(BuildContext context, String url) async {
+Future<bool> openZoomLink(BuildContext context, String url) async {
   final uri = Uri.tryParse(url);
-  if (uri == null) return;
-  for (final mode in [LaunchMode.externalApplication, LaunchMode.platformDefault, LaunchMode.inAppBrowserView]) {
+  if (uri == null ||
+      !{'https', 'http'}.contains(uri.scheme) ||
+      !uri.hasAuthority)
+    return false;
+  for (final mode in [
+    LaunchMode.externalApplication,
+    LaunchMode.platformDefault,
+    LaunchMode.inAppBrowserView,
+  ]) {
     try {
-      if (await launchUrl(uri, mode: mode)) return;
+      if (await launchUrl(uri, mode: mode)) return true;
     } catch (_) {}
   }
   await Clipboard.setData(ClipboardData(text: url));
-  if (context.mounted) toast(context, 'تعذّر فتح الرابط، تم نسخه. الصقه في المتصفح', error: true);
+  if (context.mounted)
+    toast(context, 'تعذّر فتح الرابط، تم نسخه. الصقه في المتصفح', error: true);
+  return false;
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.courseId, required this.title, this.studentId});
+  const ChatScreen({
+    super.key,
+    required this.courseId,
+    required this.title,
+    this.studentId,
+  });
   final String courseId, title;
 
   /// Teacher / supervisor: whose private thread to open. A student always opens her own (null).
@@ -54,15 +68,20 @@ class _ChatScreenState extends State<ChatScreen> {
   Map<String, dynamic>? _thread;
   List<Map<String, dynamic>> _appts = [];
   String? _notice, _error;
-  bool _loading = true, _sending = false;
+  String? _resolvedStudentId;
+  bool _loading = true, _sending = false, _nudging = false;
 
   Api get _api => context.read<Api>();
   String get _role => context.read<AuthState>().role;
   bool get _staff => _role != 'STUDENT';
   bool get _isSup => _role == 'SUPERVISOR';
-  Map<String, dynamic>? get _sq => widget.studentId == null ? null : {'studentId': widget.studentId};
-  Map<String, dynamic> get _sb => {if (widget.studentId != null) 'studentId': widget.studentId};
-  String get _threadStudent => widget.studentId ?? context.read<AuthState>().id;
+  Map<String, dynamic>? get _sq =>
+      widget.studentId == null ? null : {'studentId': widget.studentId};
+  Map<String, dynamic> get _sb => {
+    if (widget.studentId != null) 'studentId': widget.studentId,
+  };
+  String get _threadStudent =>
+      _resolvedStudentId ?? widget.studentId ?? context.read<AuthState>().id;
 
   @override
   void initState() {
@@ -87,12 +106,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _fetchMsgs() async {
     try {
-      final m = await _api.get('/courses/${widget.courseId}/messages', query: {'limit': 100, ...?_sq});
-      final items = ((m['items'] as List?) ?? []).map((e) => Message(e as Map<String, dynamic>)).toList();
+      final m = await _api.get(
+        '/courses/${widget.courseId}/messages',
+        query: {'limit': 100, ...?_sq},
+      );
+      final items = ((m['items'] as List?) ?? [])
+          .map((e) => Message(e as Map<String, dynamic>))
+          .toList();
       items.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       if (!mounted) return;
       setState(() {
-        _msgs..clear()..addAll(items);
+        _msgs
+          ..clear()
+          ..addAll(items);
         _notice = m['notice'] as String?;
         _error = null;
       });
@@ -112,11 +138,15 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadCourse() async {
     try {
       final r = await _api.get('/courses/${widget.courseId}');
-      final th = await _api.get('/courses/${widget.courseId}/thread', query: _sq);
+      final th = await _api.get(
+        '/courses/${widget.courseId}/thread',
+        query: _sq,
+      );
       if (mounted) {
         setState(() {
           _course = Course(Map<String, dynamic>.from(r['course'] as Map));
           _thread = Map<String, dynamic>.from(th as Map);
+          _resolvedStudentId = th['studentId'] as String?;
         });
       }
     } on ApiError catch (_) {}
@@ -124,24 +154,73 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _loadAppts() async {
     try {
-      final r = await _api.get('/courses/${widget.courseId}/appointments', query: _sq);
-      if (mounted) setState(() => _appts = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>());
+      final r = await _api.get(
+        '/courses/${widget.courseId}/appointments',
+        query: _sq,
+      );
+      if (mounted)
+        setState(
+          () => _appts = ((r['items'] as List?) ?? [])
+              .cast<Map<String, dynamic>>(),
+        );
     } on ApiError catch (_) {}
   }
 
   void _connect() {
-    final s = io.io(Config.baseUrl, io.OptionBuilder().setTransports(['websocket']).setAuth({'token': _api.token}).disableAutoConnect().build());
-    s.onConnect((_) => s.emitWithAck('join', {'courseId': widget.courseId, ...?_sq}, ack: (_) {}));
+    final s = io.io(
+      Config.baseUrl,
+      io.OptionBuilder()
+          .setTransports(['websocket'])
+          .setAuth({'token': _api.token})
+          .disableAutoConnect()
+          .build(),
+    );
+    s.onConnect(
+      (_) => s.emitWithAck(
+        'join',
+        {'courseId': widget.courseId, ...?_sq},
+        ack: (result) {
+          if (result is Map &&
+              result['ok'] == true &&
+              result['studentId'] is String &&
+              mounted) {
+            setState(() => _resolvedStudentId = result['studentId'] as String);
+          }
+        },
+      ),
+    );
     s.on('message', (d) {
       if (d is! Map) return;
       final m = Message(Map<String, dynamic>.from(d));
-      if ((d['courseId'] ?? widget.courseId) != widget.courseId || (d['studentId'] ?? _threadStudent) != _threadStudent || _msgs.any((x) => x.id == m.id)) return;
+      if ((d['courseId'] ?? widget.courseId) != widget.courseId ||
+          (d['studentId'] ?? _threadStudent) != _threadStudent ||
+          _msgs.any((x) => x.id == m.id))
+        return;
       if (mounted) setState(() => _msgs.add(m));
       _toBottom();
     });
     s.on('message:deleted', (d) {
       final id = d is Map ? d['id'] : d;
-      if (mounted) setState(() => _msgs.replaceRange(0, _msgs.length, _msgs.map((m) => m.id == id ? Message({...m.json, 'deleted': true, 'text': null, 'fileUrl': null, 'fileName': null}) : m).toList()));
+      if (mounted)
+        setState(
+          () => _msgs.replaceRange(
+            0,
+            _msgs.length,
+            _msgs
+                .map(
+                  (m) => m.id == id
+                      ? Message({
+                          ...m.json,
+                          'deleted': true,
+                          'text': null,
+                          'fileUrl': null,
+                          'fileName': null,
+                        })
+                      : m,
+                )
+                .toList(),
+          ),
+        );
     });
     s.on('chat:closed', (d) {
       if (!mounted || _isSup) return;
@@ -166,8 +245,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _toBottom() => WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-      });
+    if (_scroll.hasClients)
+      _scroll.animateTo(
+        _scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+  });
 
   void _addMsg(dynamic r) {
     final raw = r is Map && r['message'] is Map ? r['message'] : r;
@@ -192,9 +276,16 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     // a teacher/supervisor who pastes a Zoom link in the normal box: send it as a real session link
-    if (_staff && RegExp(r'^https://([\w-]+\.)*zoom\.(us|com)/\S+$', caseSensitive: false).hasMatch(text)) {
+    if (_staff &&
+        RegExp(
+          r'^https://([\w-]+\.)*zoom\.(us|com)/\S+$',
+          caseSensitive: false,
+        ).hasMatch(text)) {
       await _run(() async {
-        final z = await _api.post('/courses/${widget.courseId}/zoom', body: {'url': text, ..._sb});
+        final z = await _api.post(
+          '/courses/${widget.courseId}/zoom',
+          body: {'url': text, ..._sb},
+        );
         _input.clear();
         if (z is Map && z['message'] != null) _addMsg(z);
         await _loadCourse();
@@ -202,7 +293,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     await _run(() async {
-      final r = await _api.post('/courses/${widget.courseId}/messages', body: {'text': text, ..._sb});
+      final r = await _api.post(
+        '/courses/${widget.courseId}/messages',
+        body: {'text': text, ..._sb},
+      );
       _input.clear();
       _addMsg(r);
     });
@@ -212,7 +306,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final u = _zoom.text.trim();
     if (u.isEmpty) return;
     await _run(() async {
-      final r = await _api.post('/courses/${widget.courseId}/zoom', body: {'url': u, ..._sb});
+      final r = await _api.post(
+        '/courses/${widget.courseId}/zoom',
+        body: {'url': u, ..._sb},
+      );
       _zoom.clear();
       if (r is Map && r['message'] != null) _addMsg(r);
       await _loadCourse();
@@ -220,13 +317,29 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _attach() async {
-    final pick = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'pdf']);
+    final pick = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'pdf', 'mp4'],
+    );
     if (pick.isEmpty) return;
     final f = pick.first;
     final bytes = await f.xFile.readAsBytes();
+    if (bytes.lengthInBytes > 100 * 1024 * 1024) {
+      if (mounted) toast(context, 'أقصى حجم للفيديو هو 100MB', error: true);
+      return;
+    }
     await _run(() async {
-      final r = await _api.request('POST', '/files', form: FormData.fromMap({'file': MultipartFile.fromBytes(bytes, filename: f.name)}));
-      final m = await _api.post('/courses/${widget.courseId}/messages', body: {'fileUrl': r['url'], 'fileName': r['name'], ..._sb});
+      final r = await _api.request(
+        'POST',
+        '/files',
+        form: FormData.fromMap({
+          'file': MultipartFile.fromBytes(bytes, filename: f.name),
+        }),
+      );
+      final m = await _api.post(
+        '/courses/${widget.courseId}/messages',
+        body: {'fileUrl': r['url'], 'fileName': r['name'], ..._sb},
+      );
       _addMsg(m);
     });
   }
@@ -239,7 +352,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Reports a message to the academy: confirms, then opens a WhatsApp chat with support with the details filled in.
   Future<void> _report(Message m) async {
-    if (!await askConfirm(context, 'الإبلاغ عن هذه الرسالة؟', ok: 'إبلاغ', body: 'هنفتح لك واتساب برسالة جاهزة للإدارة، وهي تراجع الرسالة.')) return;
+    if (!await askConfirm(
+      context,
+      'الإبلاغ عن هذه الرسالة؟',
+      ok: 'إبلاغ',
+      body: 'هنفتح لك واتساب برسالة جاهزة للإدارة، وهي تراجع الرسالة.',
+    ))
+      return;
     final text = (m.text ?? '').trim();
     final snippet = text.length > 150 ? '${text.substring(0, 150)}...' : text;
     final msg = [
@@ -254,7 +373,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _mute(String userId) async {
     await _run(() async {
-      await _api.post('/courses/${widget.courseId}/mutes', body: {'userId': userId});
+      await _api.post(
+        '/courses/${widget.courseId}/mutes',
+        body: {'userId': userId},
+      );
       if (mounted) toast(context, 'تم الكتم (يقدر يقرأ فقط)');
     });
   }
@@ -267,10 +389,15 @@ class _ChatScreenState extends State<ChatScreen> {
     var tz = prefs.getString('ya_tz') ?? 'Asia/Riyadh';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    DateTime? date = existing == null ? today.add(const Duration(days: 1)) : null;
-    TimeOfDay? time = existing == null ? const TimeOfDay(hour: 17, minute: 0) : null;
+    DateTime? date = existing == null
+        ? today.add(const Duration(days: 1))
+        : null;
+    TimeOfDay? time = existing == null
+        ? const TimeOfDay(hour: 17, minute: 0)
+        : null;
     void fromExisting() {
-      final p = (((existing?['display'] as Map?)?['parts']) as Map?)?[tz] as Map?;
+      final p =
+          (((existing?['display'] as Map?)?['parts']) as Map?)?[tz] as Map?;
       if (p == null) return;
       final d = DateTime.tryParse('${p['date']}');
       final t = '${p['time']}'.split(':');
@@ -282,55 +409,106 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (existing != null) fromExisting();
     String two(int n) => n.toString().padLeft(2, '0');
-    final note = TextEditingController(text: (existing?['note'] as String?) ?? '');
+    final note = TextEditingController(
+      text: (existing?['note'] as String?) ?? '',
+    );
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => StatefulBuilder(
         builder: (c, set) => AlertDialog(
           title: Text(existing == null ? 'تحديد موعد' : 'تعديل الموعد'),
           content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              const Text('يظهر للطالب والمعلمة بتوقيت السعودية وتوقيت مصر معًا.', style: TextStyle(color: Ya.muted, fontSize: 12.5, height: 1.5)),
-              const SizedBox(height: 10),
-              const Text('اكتب الوقت بتوقيت', style: TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 6),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'Asia/Riyadh', label: Text('السعودية')),
-                  ButtonSegment(value: 'Africa/Cairo', label: Text('مصر')),
-                ],
-                selected: {tz},
-                onSelectionChanged: (v) => set(() {
-                  tz = v.first;
-                  if (existing != null) fromExisting();
-                }),
-              ),
-              const SizedBox(height: 10),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.event_rounded, size: 18),
-                label: Text(date == null ? 'اختر التاريخ' : '${date!.year}-${two(date!.month)}-${two(date!.day)}'),
-                onPressed: () async {
-                  var init = date ?? today.add(const Duration(days: 1));
-                  if (init.isBefore(today)) init = today;
-                  final d = await showDatePicker(context: c, initialDate: init, firstDate: today, lastDate: today.add(const Duration(days: 365)));
-                  if (d != null) set(() => date = d);
-                },
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.schedule_rounded, size: 18),
-                label: Text(time == null ? 'اختر الوقت' : '${two(time!.hour)}:${two(time!.minute)}'),
-                onPressed: () async {
-                  final t = await showTimePicker(context: c, initialTime: time ?? const TimeOfDay(hour: 17, minute: 0), helpText: 'الوقت (بتوقيت ${tz == 'Asia/Riyadh' ? 'السعودية' : 'مصر'})');
-                  if (t != null) set(() => time = t);
-                },
-              ),
-              TextField(controller: note, maxLength: 120, decoration: const InputDecoration(hintText: 'ملاحظة (اختياري) مثال: حصة مراجعة')),
-            ]),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'يظهر للطالب والمعلمة بتوقيت السعودية وتوقيت مصر معًا.',
+                  style: TextStyle(
+                    color: Ya.muted,
+                    fontSize: 12.5,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'اكتب الوقت بتوقيت',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                      value: 'Asia/Riyadh',
+                      label: Text('السعودية'),
+                    ),
+                    ButtonSegment(value: 'Africa/Cairo', label: Text('مصر')),
+                  ],
+                  selected: {tz},
+                  onSelectionChanged: (v) => set(() {
+                    tz = v.first;
+                    if (existing != null) fromExisting();
+                  }),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.event_rounded, size: 18),
+                  label: Text(
+                    date == null
+                        ? 'اختر التاريخ'
+                        : '${date!.year}-${two(date!.month)}-${two(date!.day)}',
+                  ),
+                  onPressed: () async {
+                    var init = date ?? today.add(const Duration(days: 1));
+                    if (init.isBefore(today)) init = today;
+                    final d = await showDatePicker(
+                      context: c,
+                      initialDate: init,
+                      firstDate: today,
+                      lastDate: today.add(const Duration(days: 365)),
+                    );
+                    if (d != null) set(() => date = d);
+                  },
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.schedule_rounded, size: 18),
+                  label: Text(
+                    time == null
+                        ? 'اختر الوقت'
+                        : '${two(time!.hour)}:${two(time!.minute)}',
+                  ),
+                  onPressed: () async {
+                    final t = await showTimePicker(
+                      context: c,
+                      initialTime: time ?? const TimeOfDay(hour: 17, minute: 0),
+                      helpText:
+                          'الوقت (بتوقيت ${tz == 'Asia/Riyadh' ? 'السعودية' : 'مصر'})',
+                    );
+                    if (t != null) set(() => time = t);
+                  },
+                ),
+                TextField(
+                  controller: note,
+                  maxLength: 120,
+                  decoration: const InputDecoration(
+                    hintText: 'ملاحظة (اختياري) مثال: حصة مراجعة',
+                  ),
+                ),
+              ],
+            ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('رجوع')),
-            FilledButton(onPressed: (date == null || time == null) ? null : () => Navigator.pop(c, true), child: Text(existing == null ? 'نشر الموعد' : 'حفظ التعديل')),
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('رجوع'),
+            ),
+            FilledButton(
+              onPressed: (date == null || time == null)
+                  ? null
+                  : () => Navigator.pop(c, true),
+              child: Text(existing == null ? 'نشر الموعد' : 'حفظ التعديل'),
+            ),
           ],
         ),
       ),
@@ -346,11 +524,17 @@ class _ChatScreenState extends State<ChatScreen> {
       };
       if (existing == null) {
         if (note.text.trim().isNotEmpty) body['note'] = note.text.trim();
-        final r = await _api.post('/courses/${widget.courseId}/appointments', body: body);
+        final r = await _api.post(
+          '/courses/${widget.courseId}/appointments',
+          body: body,
+        );
         _addMsg(r);
       } else {
         body['note'] = note.text.trim().isEmpty ? null : note.text.trim();
-        await _api.patch('/courses/${widget.courseId}/appointments/${existing['id']}', body: body);
+        await _api.patch(
+          '/courses/${widget.courseId}/appointments/${existing['id']}',
+          body: body,
+        );
         await _fetchMsgs();
       }
       await _loadAppts();
@@ -363,8 +547,14 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (c) => AlertDialog(
         title: const Text('إلغاء هذا الموعد؟'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('رجوع')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('إلغاء الموعد')),
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('رجوع'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('إلغاء الموعد'),
+          ),
         ],
       ),
     );
@@ -379,7 +569,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _confirm(bool held) async {
     if (_confirming) return;
-    final ok = await confirmSession(context, widget.courseId, held, studentId: widget.studentId);
+    final ok = await confirmSession(
+      context,
+      widget.courseId,
+      held,
+      studentId: _thread?['studentId'] as String? ?? widget.studentId,
+      pendingSince: _thread?['pendingSince'] as String?,
+    );
     if (!ok || !mounted) return;
     // hide the box right away (the server already recorded it), then refresh in the background
     setState(() {
@@ -387,7 +583,10 @@ class _ChatScreenState extends State<ChatScreen> {
       _thread = {...?_thread, 'pendingConfirmation': false};
     });
     try {
-      await Future.wait([_loadCourse(), _fetchMsgs()]).timeout(const Duration(seconds: 15));
+      await Future.wait([
+        _loadCourse(),
+        _fetchMsgs(),
+      ]).timeout(const Duration(seconds: 15));
     } catch (_) {
       // the next socket event or pull will refresh it
     } finally {
@@ -400,108 +599,304 @@ class _ChatScreenState extends State<ChatScreen> {
     final links = <Message>[];
     for (var i = _msgs.length - 1; i >= 0; i--) {
       if (_msgs[i].kind == 'SYSTEM') break;
-      if (_msgs[i].kind == 'ZOOM_LINK' && !_msgs[i].deleted) links.insert(0, _msgs[i]);
+      if (_msgs[i].kind == 'ZOOM_LINK' && !_msgs[i].deleted)
+        links.insert(0, _msgs[i]);
     }
     if (links.isEmpty) return null;
     final now = DateTime.now();
     final start = links.first.createdAt, last = links.last.createdAt;
-    final left = start.add(const Duration(minutes: sessionMin)).difference(now).inSeconds;
+    final left = start
+        .add(const Duration(minutes: sessionMin))
+        .difference(now)
+        .inSeconds;
     final leftMin = (left / 60).ceil();
-    final zleft = (last.add(const Duration(minutes: zoomMin)).difference(now).inSeconds / 60).ceil();
-    if (leftMin <= 0 || zleft > zoomWarn || !start.add(const Duration(minutes: sessionMin)).isAfter(last.add(const Duration(minutes: zoomMin)))) return null;
+    final zleft =
+        (last.add(const Duration(minutes: zoomMin)).difference(now).inSeconds /
+                60)
+            .ceil();
+    if (leftMin <= 0 ||
+        zleft > zoomWarn ||
+        !start
+            .add(const Duration(minutes: sessionMin))
+            .isAfter(last.add(const Duration(minutes: zoomMin))))
+      return null;
     final hot = zleft <= 0;
-    final title = hot ? '🔄 انتهى اجتماع Zoom وتبقّى $leftMin ${leftMin <= 10 ? (leftMin == 1 ? 'دقيقة' : 'دقائق') : 'دقيقة'} من الحصة' : '⏳ ينتهي اجتماع Zoom بعد $zleft ${zleft == 1 ? 'دقيقة' : 'دقائق'}';
+    final title = hot
+        ? '🔄 انتهى اجتماع Zoom وتبقّى $leftMin ${leftMin <= 10 ? (leftMin == 1 ? 'دقيقة' : 'دقائق') : 'دقيقة'} من الحصة'
+        : '⏳ ينتهي اجتماع Zoom بعد $zleft ${zleft == 1 ? 'دقيقة' : 'دقائق'}';
     final sub = _staff
-        ? (hot ? 'أنشئي اجتماعاً جديداً وأرسلي رابطه ليدخل الطلاب.' : 'أنشئي اجتماعاً جديداً وأرسلي رابطه الآن لتكمل الحصة بلا انقطاع.')
-        : (hot ? 'انتظر رابطاً جديداً من المعلم في هذه المحادثة.' : 'ستصلك رسالة برابط جديد من المعلم لإكمال الحصة.');
+        ? (hot
+              ? 'أنشئي اجتماعاً جديداً وأرسلي رابطه ليدخل الطلاب.'
+              : 'أنشئي اجتماعاً جديداً وأرسلي رابطه الآن لتكمل الحصة بلا انقطاع.')
+        : (hot
+              ? 'انتظر رابطاً جديداً من المعلم في هذه المحادثة.'
+              : 'ستصلك رسالة برابط جديد من المعلم لإكمال الحصة.');
     return _banner(
       bg: hot ? Ya.dangerBg : Ya.warnBg,
       fg: hot ? Ya.danger : Ya.warn,
       title: title,
       sub: sub,
       action: _staff
-          ? SizedBox(width: 130, child: GradButton(label: 'رابط جديد', icon: Icons.add_link_rounded, height: 40, onPressed: () {
-              _zoomFocus.requestFocus();
-              toast(context, 'الصقي رابط الاجتماع الجديد ثم اضغط إرسال');
-            }))
+          ? SizedBox(
+              width: 130,
+              child: GradButton(
+                label: 'رابط جديد',
+                icon: Icons.add_link_rounded,
+                height: 40,
+                onPressed: () {
+                  _zoomFocus.requestFocus();
+                  toast(context, 'الصقي رابط الاجتماع الجديد ثم اضغط إرسال');
+                },
+              ),
+            )
           : null,
     );
   }
 
-  Widget _banner({required Color bg, required Color fg, required String title, String? sub, Widget? action}) => Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(16)),
-        child: Row(children: [
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: TextStyle(color: fg, fontWeight: FontWeight.w700, fontSize: 14)),
-            if (sub != null) Padding(padding: const EdgeInsets.only(top: 3), child: Text(sub, style: const TextStyle(color: Ya.muted, fontSize: 12.5, height: 1.5))),
-          ])),
-          if (action != null) ...[const SizedBox(width: 10), action],
-        ]),
-      );
+  Widget _banner({
+    required Color bg,
+    required Color fg,
+    required String title,
+    String? sub,
+    Widget? action,
+  }) => Container(
+    margin: const EdgeInsets.only(bottom: 10),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: fg,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+              ),
+              if (sub != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Text(
+                    sub,
+                    style: const TextStyle(
+                      color: Ya.muted,
+                      fontSize: 12.5,
+                      height: 1.5,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        if (action != null) ...[const SizedBox(width: 10), action],
+      ],
+    ),
+  );
 
   Widget _apptBar() {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: Ya.soft, borderRadius: BorderRadius.circular(16)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const Text('🕒 المواعيد القادمة', style: TextStyle(fontWeight: FontWeight.w700, color: Ya.strong)),
-        for (final a in _appts.take(4))
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(children: [
-              Expanded(child: _apptTimes(a, bold: true)),
-              if (_staff) ...[
-                TextButton(onPressed: () => _apptForm(existing: a), child: const Text('تعديل')),
-                TextButton(onPressed: () => _cancelAppt(a['id'] as String), child: const Text('إلغاء', style: TextStyle(color: Ya.danger))),
-              ],
-            ]),
+      decoration: BoxDecoration(
+        color: Ya.soft,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            '🕒 المواعيد القادمة',
+            style: TextStyle(fontWeight: FontWeight.w700, color: Ya.strong),
           ),
-        if (_appts.length > 4) Padding(padding: const EdgeInsets.only(top: 4), child: Text('و${_appts.length - 4} مواعيد أخرى', style: const TextStyle(color: Ya.muted, fontSize: 12.5))),
-      ]),
+          for (final a in _appts.take(4))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Row(
+                children: [
+                  Expanded(child: _apptTimes(a, bold: true)),
+                  if (_staff) ...[
+                    TextButton(
+                      onPressed: () => _apptForm(existing: a),
+                      child: const Text('تعديل'),
+                    ),
+                    TextButton(
+                      onPressed: () => _cancelAppt(a['id'] as String),
+                      child: const Text(
+                        'إلغاء',
+                        style: TextStyle(color: Ya.danger),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          if (_appts.length > 4)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'و${_appts.length - 4} مواعيد أخرى',
+                style: const TextStyle(color: Ya.muted, fontSize: 12.5),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
+  Future<void> _nudgeStudent() async {
+    if (_nudging) return;
+    setState(() => _nudging = true);
+    try {
+      final endpoint = _staff ? 'lesson-nudge' : 'teacher-nudge';
+      await _api.post('/courses/${widget.courseId}/$endpoint', body: _sb);
+      if (mounted) toast(context, 'تم إرسال تنبيه الحصة');
+    } on ApiError catch (error) {
+      if (mounted) toast(context, error.message, error: true);
+    } finally {
+      if (mounted) setState(() => _nudging = false);
+    }
+  }
+
   Widget _composer() {
-    final bar = BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(26), boxShadow: [BoxShadow(color: const Color(0xFF1F5A73).withValues(alpha: .12), blurRadius: 18, offset: const Offset(0, 6))]);
-    Widget circle(IconData i, VoidCallback? f, {bool grad = false}) => GestureDetector(
+    final bar = BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(26),
+      boxShadow: [
+        BoxShadow(
+          color: const Color(0xFF1F5A73).withValues(alpha: .12),
+          blurRadius: 18,
+          offset: const Offset(0, 6),
+        ),
+      ],
+    );
+    Widget circle(IconData i, VoidCallback? f, {bool grad = false}) =>
+        GestureDetector(
           onTap: f,
           child: Container(
-            width: 44, height: 44,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: grad ? null : Ya.soft, gradient: grad ? Ya.btnGradient : null, boxShadow: grad ? [BoxShadow(color: Ya.teal.withValues(alpha: .28), blurRadius: 12, offset: const Offset(0, 6))] : null),
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: grad ? null : Ya.soft,
+              gradient: grad ? Ya.btnGradient : null,
+              boxShadow: grad
+                  ? [
+                      BoxShadow(
+                        color: Ya.teal.withValues(alpha: .28),
+                        blurRadius: 12,
+                        offset: const Offset(0, 6),
+                      ),
+                    ]
+                  : null,
+            ),
             child: Icon(i, color: grad ? Colors.white : Ya.strong, size: 20),
           ),
         );
     final attach = circle(Icons.attach_file_rounded, _sending ? null : _attach);
     final apptBtn = SizedBox(
       width: 150,
-      child: OutlinedButton.icon(onPressed: () => _apptForm(), icon: const Icon(Icons.schedule_rounded, size: 18), label: const Text('تحديد موعد')),
+      child: OutlinedButton.icon(
+        onPressed: () => _apptForm(),
+        icon: const Icon(Icons.schedule_rounded, size: 18),
+        label: const Text('تحديد موعد'),
+      ),
     );
-    Widget zoomRow(String hint) => Row(children: [
-          Expanded(child: TextField(controller: _zoom, focusNode: _zoomFocus, textDirection: TextDirection.ltr, keyboardType: TextInputType.url, decoration: InputDecoration(hintText: hint, filled: false, border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none))),
-          circle(Icons.add_link_rounded, _sending ? null : _sendZoom, grad: true),
-        ]);
-    Widget textRow() => Row(children: [
-          attach,
-          const SizedBox(width: 6),
-          Expanded(child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: const InputDecoration(hintText: 'اكتب رسالة…', filled: false, border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none))),
-          circle(Icons.send_rounded, _sending ? null : _sendText, grad: true),
-        ]);
+    Widget zoomRow(String hint) => Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _zoom,
+            focusNode: _zoomFocus,
+            textDirection: TextDirection.ltr,
+            keyboardType: TextInputType.url,
+            decoration: InputDecoration(
+              hintText: hint,
+              filled: false,
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+            ),
+          ),
+        ),
+        circle(Icons.add_link_rounded, _sending ? null : _sendZoom, grad: true),
+      ],
+    );
+    Widget textRow() => Row(
+      children: [
+        attach,
+        const SizedBox(width: 6),
+        Expanded(
+          child: TextField(
+            controller: _input,
+            minLines: 1,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              hintText: 'اكتب رسالة…',
+              filled: false,
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+            ),
+          ),
+        ),
+        circle(Icons.send_rounded, _sending ? null : _sendText, grad: true),
+      ],
+    );
     final Widget content;
     if (_role == 'TEACHER' || _isSup) {
-      content = Column(mainAxisSize: MainAxisSize.min, children: [
-        textRow(),
-        zoomRow('رابط Zoom (اختياري)'),
-        Padding(padding: const EdgeInsets.only(bottom: 4), child: apptBtn),
-      ]);
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          textRow(),
+          zoomRow('رابط Zoom (اختياري)'),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              children: [
+                apptBtn,
+                OutlinedButton.icon(
+                  onPressed: _nudging ? null : _nudgeStudent,
+                  icon: const Icon(
+                    Icons.notifications_active_outlined,
+                    size: 18,
+                  ),
+                  label: Text(_nudging ? 'جارٍ الإرسال…' : 'نبّه الطالب'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
     } else {
-      content = textRow();
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          textRow(),
+          OutlinedButton.icon(
+            onPressed: _nudging ? null : _nudgeStudent,
+            icon: const Icon(Icons.phone_in_talk_outlined, size: 18),
+            label: Text(_nudging ? 'جارٍ الإرسال…' : 'نبّه المعلم'),
+          ),
+        ],
+      );
     }
     return SafeArea(
       top: false,
-      child: Container(margin: const EdgeInsets.fromLTRB(12, 0, 12, 12), padding: const EdgeInsets.all(6), decoration: bar, child: content),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        padding: const EdgeInsets.all(6),
+        decoration: bar,
+        child: content,
+      ),
     );
   }
 
@@ -515,16 +910,43 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_thread?['counter'] is Map)
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: Text('${_staff ? '${widget.title}: ' : 'حصصك: '}${(_thread!['counter'] as Map)['done']} من ${(_thread!['counter'] as Map)['total']}', textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted, fontSize: 13)),
+          child: Text(
+            '${_staff ? '${widget.title}: ' : 'حصصك: '}${(_thread!['counter'] as Map)['done']} من ${(_thread!['counter'] as Map)['total']}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Ya.muted, fontSize: 13),
+          ),
         ),
       if (_appts.isNotEmpty) _apptBar(),
       if (c != null && _staff && _confirming)
-        const Padding(padding: EdgeInsets.only(top: 10), child: Center(child: CircularProgressIndicator(color: Ya.teal)))
+        const Padding(
+          padding: EdgeInsets.only(top: 10),
+          child: Center(child: CircularProgressIndicator(color: Ya.teal)),
+        )
       else if (c != null && _staff && _thread?['pendingConfirmation'] == true)
-        ConfirmBox(pendingSince: DateTime.tryParse('${_thread?['pendingSince'] ?? ''}')?.toLocal(), onConfirm: _confirm, onAttendance: () => showAttendanceSheet(context, widget.courseId, studentId: widget.studentId)),
-      if (zb != null) Padding(padding: const EdgeInsets.only(top: 10), child: zb),
-      if (c?.chatClosed == true) _banner(bg: Ya.warnBg, fg: Ya.warn, title: 'المحادثة مغلقة من الإدارة${_isSup ? ' (تظهر لك للمتابعة)' : ''}'),
-      if (_notice != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(_notice!, textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted, fontSize: 13))),
+        ConfirmBox(
+          pendingSince: DateTime.tryParse(
+            '${_thread?['pendingSince'] ?? ''}',
+          )?.toLocal(),
+          onConfirm: _confirm,
+        ),
+      if (zb != null)
+        Padding(padding: const EdgeInsets.only(top: 10), child: zb),
+      if (c?.chatClosed == true)
+        _banner(
+          bg: Ya.warnBg,
+          fg: Ya.warn,
+          title:
+              'المحادثة مغلقة من الإدارة${_isSup ? ' (تظهر لك للمتابعة)' : ''}',
+        ),
+      if (_notice != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+            _notice!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Ya.muted, fontSize: 13),
+          ),
+        ),
     ];
     return YaPage(
       title: widget.title,
@@ -537,9 +959,21 @@ class _ChatScreenState extends State<ChatScreen> {
               padding: const EdgeInsets.all(16),
               children: [
                 ...header,
-                if (_msgs.isEmpty && _error == null) const EmptyState(title: 'ابدأ المحادثة', hint: 'اكتب رسالة لمعلمك، ورابط الحصة هيظهر هنا.'),
+                if (_msgs.isEmpty && _error == null)
+                  const EmptyState(
+                    title: 'ابدأ المحادثة',
+                    hint: 'اكتب رسالة لمعلمك، ورابط الحصة هيظهر هنا.',
+                  ),
                 for (final m in _msgs)
-                  _Bubble(m, mine: m.senderId == me, api: _api, sup: _isSup, onDelete: () => _delete(m), onMute: (id) => _mute(id), onReport: () => _report(m)),
+                  _Bubble(
+                    m,
+                    mine: m.senderId == me,
+                    api: _api,
+                    sup: _isSup,
+                    onDelete: () => _delete(m),
+                    onMute: (id) => _mute(id),
+                    onReport: () => _report(m),
+                  ),
               ],
             ),
     );
@@ -547,7 +981,15 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble(this.m, {required this.mine, required this.api, required this.sup, required this.onDelete, required this.onMute, required this.onReport});
+  const _Bubble(
+    this.m, {
+    required this.mine,
+    required this.api,
+    required this.sup,
+    required this.onDelete,
+    required this.onMute,
+    required this.onReport,
+  });
   final Message m;
   final bool mine, sup;
   final Api api;
@@ -560,105 +1002,271 @@ class _Bubble extends StatelessWidget {
     if (m.kind == 'SYSTEM') {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Center(child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-          decoration: BoxDecoration(color: Ya.bg, borderRadius: BorderRadius.circular(999)),
-          child: Text(m.text ?? '', textAlign: TextAlign.center, style: const TextStyle(fontSize: 12.5, color: Ya.muted, height: 1.6)),
-        )),
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+            decoration: BoxDecoration(
+              color: Ya.bg,
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              m.text ?? '',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 12.5,
+                color: Ya.muted,
+                height: 1.6,
+              ),
+            ),
+          ),
+        ),
       );
     }
     final isLink = m.kind == 'ZOOM_LINK';
     final isAppt = m.kind == 'APPOINTMENT';
     final isImg = m.kind == 'IMAGE' && m.fileUrl != null;
-    final role = switch ((m.json['sender'] as Map?)?['role']) { 'TEACHER' => 'معلم', 'SUPERVISOR' => 'مشرف', _ => '' };
+    final isVideo = m.kind == 'VIDEO' && m.fileUrl != null;
+    final role = switch ((m.json['sender'] as Map?)?['role']) {
+      'TEACHER' => 'معلم',
+      'SUPERVISOR' => 'مشرف',
+      _ => '',
+    };
     final appt = m.json['appointment'] as Map?;
     final gone = appt?['cancelled'] == true;
     return Align(
-      alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
+      alignment: mine
+          ? AlignmentDirectional.centerEnd
+          : AlignmentDirectional.centerStart,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * .8),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * .8,
+        ),
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: (isLink || isAppt) ? Ya.warnBg : mine ? const Color(0xFFD3EAEF) : Colors.white,
+          color: (isLink || isAppt)
+              ? Ya.warnBg
+              : mine
+              ? const Color(0xFFD3EAEF)
+              : Colors.white,
           borderRadius: BorderRadiusDirectional.only(
             topStart: const Radius.circular(16),
             topEnd: const Radius.circular(16),
             bottomStart: Radius.circular(mine ? 16 : 4),
             bottomEnd: Radius.circular(mine ? 4 : 16),
           ),
-          boxShadow: [BoxShadow(color: Ya.ink.withValues(alpha: .05), blurRadius: 12, offset: const Offset(0, 4))],
+          boxShadow: [
+            BoxShadow(
+              color: Ya.ink.withValues(alpha: .05),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (!mine && m.senderName != null)
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              Text(m.senderName!, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Ya.strong)),
-              if (role.isNotEmpty) ...[const SizedBox(width: 6), Pill(role)],
-            ]),
-          if (m.deleted) const Text('تم حذف هذه الرسالة', style: TextStyle(color: Ya.muted, fontStyle: FontStyle.italic)),
-          if (!m.deleted && isAppt)
-            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('🕒 ', style: TextStyle(fontSize: 18)),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(gone ? 'موعد ملغي' : 'موعد جديد', style: TextStyle(fontWeight: FontWeight.w700, decoration: gone ? TextDecoration.lineThrough : null)),
-                if (appt != null) _apptTimes(appt),
-                if ((m.text ?? '').isNotEmpty) Text(m.text!, style: const TextStyle(color: Ya.muted, fontSize: 13)),
-              ])),
-            ]),
-          if (!m.deleted && isImg) ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(api.absolute(m.fileUrl!), width: 220, fit: BoxFit.cover)),
-          if (!m.deleted && m.kind == 'PDF' && m.fileUrl != null)
-            TextButton.icon(onPressed: () => launchUrl(Uri.parse(api.absolute(m.fileUrl!)), mode: LaunchMode.externalApplication), icon: const Icon(Icons.picture_as_pdf_rounded), label: Text(m.fileName ?? 'ملف PDF')),
-          if (!m.deleted && !isAppt && (m.text ?? '').isNotEmpty)
-            isLink
-                ? Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    const Text('رابط الحصة', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Ya.warn)),
-                    const SizedBox(height: 8),
-                    GradButton(
-                      height: 44,
-                      icon: Icons.add_link_rounded,
-                      label: 'انضمام للحصة (Zoom)',
-                      onPressed: () {
-                        final url = RegExp(r'https?://\S+').firstMatch(m.text!)?.group(0);
-                        if (url == null) return;
-                        // remember when a student opened the link (a hint for the teacher's attendance)
-                        if (context.read<AuthState>().isStudent) {
-                          final cid = (m.json['courseId'] ?? '') as String;
-                          if (cid.isNotEmpty) api.post('/courses/$cid/attendance/join').catchError((_) => <String, dynamic>{});
-                        }
-                        openZoomLink(context, url);
-                      },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!mine && m.senderName != null)
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    m.senderName!,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Ya.strong,
                     ),
-                    TextButton.icon(
-                      onPressed: () {
-                        final url = RegExp(r'https?://\S+').firstMatch(m.text!)?.group(0);
-                        if (url == null) return;
-                        Clipboard.setData(ClipboardData(text: url));
-                        toast(context, 'تم نسخ الرابط');
-                      },
-                      icon: const Icon(Icons.copy_rounded, size: 16),
-                      label: const Text('نسخ الرابط'),
-                    ),
-                  ])
-                : SelectableText(m.text!, style: const TextStyle(fontSize: 14.5, height: 1.8)),
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Text(fdt(m.createdAt), style: const TextStyle(fontSize: 11, color: Ya.muted)),
-              if (!mine && !sup && !m.deleted && !isLink && !isAppt) ...[
-                const SizedBox(width: 10),
-                GestureDetector(onTap: onReport, child: const Text('إبلاغ', style: TextStyle(fontSize: 12, color: Ya.muted, fontWeight: FontWeight.w600))),
-              ],
-              if (sup && !m.deleted) ...[
-                const SizedBox(width: 10),
-                GestureDetector(onTap: onDelete, child: const Text('حذف', style: TextStyle(fontSize: 12, color: Ya.danger, fontWeight: FontWeight.w600))),
-                if (m.senderId != null && (m.json['sender'] as Map?)?['role'] != 'SUPERVISOR') ...[
-                  const SizedBox(width: 10),
-                  GestureDetector(onTap: () => onMute(m.senderId!), child: const Text('كتم', style: TextStyle(fontSize: 12, color: Ya.danger, fontWeight: FontWeight.w600))),
+                  ),
+                  if (role.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Pill(role),
+                  ],
                 ],
-              ],
-            ]),
-          ),
-        ]),
+              ),
+            if (m.deleted)
+              const Text(
+                'تم حذف هذه الرسالة',
+                style: TextStyle(color: Ya.muted, fontStyle: FontStyle.italic),
+              ),
+            if (!m.deleted && isAppt)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('🕒 ', style: TextStyle(fontSize: 18)),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          gone ? 'موعد ملغي' : 'موعد جديد',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            decoration: gone
+                                ? TextDecoration.lineThrough
+                                : null,
+                          ),
+                        ),
+                        if (appt != null) _apptTimes(appt),
+                        if ((m.text ?? '').isNotEmpty)
+                          Text(
+                            m.text!,
+                            style: const TextStyle(
+                              color: Ya.muted,
+                              fontSize: 13,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            if (!m.deleted && isImg)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.network(
+                  api.absolute(m.fileUrl!),
+                  width: 220,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            if (!m.deleted && m.kind == 'PDF' && m.fileUrl != null)
+              TextButton.icon(
+                onPressed: () => launchUrl(
+                  Uri.parse(api.absolute(m.fileUrl!)),
+                  mode: LaunchMode.externalApplication,
+                ),
+                icon: const Icon(Icons.picture_as_pdf_rounded),
+                label: Text(m.fileName ?? 'ملف PDF'),
+              ),
+            if (!m.deleted && isVideo)
+              TextButton.icon(
+                onPressed: () => launchUrl(
+                  Uri.parse(api.absolute(m.fileUrl!)),
+                  mode: LaunchMode.externalApplication,
+                ),
+                icon: const Icon(Icons.play_circle_fill_rounded),
+                label: Text(m.fileName ?? 'فيديو MP4'),
+              ),
+            if (!m.deleted && !isAppt && (m.text ?? '').isNotEmpty)
+              isLink
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          'رابط الحصة',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: Ya.warn,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        GradButton(
+                          height: 44,
+                          icon: Icons.add_link_rounded,
+                          label: 'انضمام للحصة (Zoom)',
+                          onPressed: () async {
+                            final url = RegExp(
+                              r'https?://\S+',
+                            ).firstMatch(m.text!)?.group(0);
+                            if (url == null) return;
+                            final auth = context.read<AuthState>();
+                            final student = auth.isStudent ? auth.id : null;
+                            final courseId =
+                                (m.json['courseId'] ?? '') as String;
+                            final opened = await openZoomLink(context, url);
+                            if (opened &&
+                                student != null &&
+                                auth.id == student &&
+                                courseId.isNotEmpty) {
+                              unawaited(
+                                api
+                                    .post(
+                                      '/courses/$courseId/attendance/join',
+                                      body: {'messageId': m.id},
+                                    )
+                                    .then<void>((_) {}, onError: (Object _) {}),
+                              );
+                            }
+                          },
+                        ),
+                        TextButton.icon(
+                          onPressed: () {
+                            final url = RegExp(
+                              r'https?://\S+',
+                            ).firstMatch(m.text!)?.group(0);
+                            if (url == null) return;
+                            Clipboard.setData(ClipboardData(text: url));
+                            toast(context, 'تم نسخ الرابط');
+                          },
+                          icon: const Icon(Icons.copy_rounded, size: 16),
+                          label: const Text('نسخ الرابط'),
+                        ),
+                      ],
+                    )
+                  : SelectableText(
+                      m.text!,
+                      style: const TextStyle(fontSize: 14.5, height: 1.8),
+                    ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    fdt(m.createdAt),
+                    style: const TextStyle(fontSize: 11, color: Ya.muted),
+                  ),
+                  if (!mine && !sup && !m.deleted && !isLink && !isAppt) ...[
+                    const SizedBox(width: 10),
+                    GestureDetector(
+                      onTap: onReport,
+                      child: const Text(
+                        'إبلاغ',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Ya.muted,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (sup && !m.deleted) ...[
+                    const SizedBox(width: 10),
+                    GestureDetector(
+                      onTap: onDelete,
+                      child: const Text(
+                        'حذف',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Ya.danger,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (m.senderId != null &&
+                        (m.json['sender'] as Map?)?['role'] !=
+                            'SUPERVISOR') ...[
+                      const SizedBox(width: 10),
+                      GestureDetector(
+                        onTap: () => onMute(m.senderId!),
+                        child: const Text(
+                          'كتم',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Ya.danger,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -669,11 +1277,27 @@ Widget _apptTimes(Map a, {bool bold = false}) {
   final d = a['display'] as Map?;
   final note = (a['note'] ?? '').toString();
   if (d == null) {
-    return Text(fappt(DateTime.parse('${a['startsAt']}')), style: TextStyle(fontWeight: bold ? FontWeight.w600 : FontWeight.w400));
+    return Text(
+      fappt(DateTime.parse('${a['startsAt']}')),
+      style: TextStyle(fontWeight: bold ? FontWeight.w600 : FontWeight.w400),
+    );
   }
-  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-    Text('السعودية: ${d['saudi']}', style: TextStyle(fontWeight: bold ? FontWeight.w600 : FontWeight.w400, fontSize: 14)),
-    Text('مصر: ${d['egypt']}', style: const TextStyle(color: Ya.muted, fontSize: 13)),
-    if (bold && note.isNotEmpty) Text(note, style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
-  ]);
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        'السعودية: ${d['saudi']}',
+        style: TextStyle(
+          fontWeight: bold ? FontWeight.w600 : FontWeight.w400,
+          fontSize: 14,
+        ),
+      ),
+      Text(
+        'مصر: ${d['egypt']}',
+        style: const TextStyle(color: Ya.muted, fontSize: 13),
+      ),
+      if (bold && note.isNotEmpty)
+        Text(note, style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
+    ],
+  );
 }

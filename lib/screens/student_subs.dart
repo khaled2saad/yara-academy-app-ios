@@ -3,6 +3,7 @@ import 'tour.dart';
 import 'package:provider/provider.dart';
 
 import '../core/api.dart';
+import '../core/auth.dart';
 import '../core/live.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
@@ -100,7 +101,7 @@ class _MySubsPageState extends State<MySubsPage> {
           : RefreshIndicator(
               onRefresh: _load,
               child: _subs.isEmpty
-                  ? ListView(children: const [EmptyState(title: 'لسه مفيش اشتراكات', hint: 'اختر كورس من تبويب «الكورسات» وابدأ حصتك الأولى.', mascot: 'fox')])
+                  ? ListView(children: [EmptyState(title: context.read<AuthState>().freeAccess ? 'لسه مفيش كورسات' : 'لسه مفيش اشتراكات', hint: 'اختر كورس من تبويب «الكورسات» وابدأ حصتك الأولى.', mascot: 'fox')])
                   : ListView.separated(
                       padding: const EdgeInsets.all(16),
                       itemCount: _subs.length,

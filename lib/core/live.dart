@@ -11,6 +11,9 @@ class Live extends ChangeNotifier {
   final Api _api;
   io.Socket? _s;
 
+  /// Set by the shell right after construction: skips subscription/payment wording for free-access students.
+  bool free = false;
+
   /// Set by the shell: shows a toast (message, celebrate?).
   void Function(String msg, {bool celebrate})? onMessage;
 
@@ -20,7 +23,11 @@ class Live extends ChangeNotifier {
     s.on('subscription:updated', (d) {
       final st = d is Map ? d['status'] : null;
       onMessage?.call(
-        st == 'ACTIVE' ? 'تمت الموافقة على اشتراكك 🎉' : st == 'REJECTED' ? 'تم رفض طلب الاشتراك' : 'تحديث في اشتراكك',
+        st == 'ACTIVE'
+            ? (free ? 'الكورس اتفعّل 🎉' : 'تمت الموافقة على اشتراكك 🎉')
+            : st == 'REJECTED'
+                ? (free ? 'تعذّر تفعيل الكورس' : 'تم رفض طلب الاشتراك')
+                : (free ? 'تحديث في كورسك' : 'تحديث في اشتراكك'),
         celebrate: st == 'ACTIVE',
       );
       notifyListeners();

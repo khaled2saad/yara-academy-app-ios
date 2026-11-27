@@ -20,6 +20,80 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
   List<Map<String, dynamic>> _items = [];
   bool _loading = true;
 
+  Future<void> _addPartner(Map<String, dynamic> reference) async {
+    final code = TextEditingController();
+    final name = TextEditingController();
+    await showYaSheet<void>(
+      context,
+      (sheetContext) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('إضافة شريك للاشتراك', style: Ya.display(size: 23)),
+          const SizedBox(height: 5),
+          Text(
+            '${reference['fullName']} · ${widget.title}',
+            style: const TextStyle(color: Ya.muted),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+              color: Ya.soft,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Text(
+              'نفس الموعد وZoom والشات والحصص. تُحتسب للمعلمة حصة واحدة فقط.',
+              style: TextStyle(color: Ya.strong, height: 1.5),
+            ),
+          ),
+          Field(
+            'رقم طالب مسجّل',
+            child: TextField(
+              controller: code,
+              keyboardType: TextInputType.number,
+              textDirection: TextDirection.ltr,
+              decoration: const InputDecoration(hintText: '123456'),
+            ),
+          ),
+          Field(
+            'أو الاسم الرباعي لطالب جديد',
+            child: TextField(controller: name),
+          ),
+          const SizedBox(height: 16),
+          GradButton(
+            label: 'إضافة شريك للاشتراك',
+            onPressed: () async {
+              final body = <String, dynamic>{};
+              if (code.text.trim().isNotEmpty) {
+                body['studentCode'] = code.text.trim();
+              } else {
+                body['fullName'] = name.text.trim();
+              }
+              try {
+                final result = await context.read<Api>().post(
+                  '/subscriptions/${reference['subscriptionId']}/partners',
+                  body: body,
+                );
+                if (!mounted) return;
+                if (!sheetContext.mounted) return;
+                Navigator.pop(sheetContext);
+                final student = result['student'] as Map;
+                toast(
+                  context,
+                  'تمت إضافة ${student['fullName']} كشريك للاشتراك',
+                );
+                await _load();
+              } on ApiError catch (error) {
+                if (sheetContext.mounted)
+                  toast(sheetContext, error.message, error: true);
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -28,7 +102,9 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
 
   Future<void> _load() async {
     try {
-      final r = await context.read<Api>().get('/courses/${widget.courseId}/threads');
+      final r = await context.read<Api>().get(
+        '/courses/${widget.courseId}/threads',
+      );
       if (!mounted) return;
       setState(() {
         _items = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>();
@@ -44,10 +120,18 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
 
   Future<void> _remove(Map<String, dynamic> t) async {
     final name = t['fullName'] as String? ?? '';
-    if (!await askConfirm(context, 'إزالة $name من هذا الكورس؟', ok: 'إزالة', body: 'هيتقفل اشتراكه وسجل الحصص يفضل محفوظ.')) return;
+    if (!await askConfirm(
+      context,
+      'إزالة $name من هذا الكورس؟',
+      ok: 'إزالة',
+      body: 'هيتقفل اشتراكه وسجل الحصص يفضل محفوظ.',
+    ))
+      return;
     if (!mounted) return;
     try {
-      await context.read<Api>().post('/staff/subscriptions/${t['subscriptionId']}/remove');
+      await context.read<Api>().post(
+        '/staff/subscriptions/${t['subscriptionId']}/remove',
+      );
       if (mounted) await _load();
     } on ApiError catch (e) {
       if (mounted) toast(context, e.message, error: true);
@@ -57,7 +141,13 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
   Future<void> _open(Map<String, dynamic> t) async {
     await Navigator.push(
       context,
-      MaterialPageRoute<void>(builder: (_) => ChatScreen(courseId: widget.courseId, title: t['fullName'] as String? ?? widget.title, studentId: t['studentId'] as String)),
+      MaterialPageRoute<void>(
+        builder: (_) => ChatScreen(
+          courseId: widget.courseId,
+          title: t['fullName'] as String? ?? widget.title,
+          studentId: t['studentId'] as String,
+        ),
+      ),
     );
     if (mounted) _load();
   }
@@ -72,14 +162,29 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
           : RefreshIndicator(
               onRefresh: _load,
               child: _items.isEmpty
-                  ? ListView(children: const [EmptyState(title: 'مفيش طلاب لسه', hint: 'لما طالب يتفعّل اشتراكه هيظهر هنا بمحادثته الخاصة.')])
+                  ? ListView(
+                      children: const [
+                        EmptyState(
+                          title: 'مفيش طلاب لسه',
+                          hint:
+                              'لما طالب يتفعّل اشتراكه هيظهر هنا بمحادثته الخاصة.',
+                        ),
+                      ],
+                    )
                   : ListView.separated(
                       padding: const EdgeInsets.all(16),
                       itemCount: _items.length + 1,
                       separatorBuilder: (_, _) => const SizedBox(height: 12),
                       itemBuilder: (_, i) {
                         if (i == 0) {
-                          return const Text('لكل طالب محادثة وموعد وحصة خاصة به. اضغط على الطالب لفتح محادثته.', style: TextStyle(color: Ya.muted, fontSize: 13, height: 1.6));
+                          return const Text(
+                            'لكل طالب محادثة وموعد وحصة خاصة به. اضغط على الطالب لفتح محادثته.',
+                            style: TextStyle(
+                              color: Ya.muted,
+                              fontSize: 13,
+                              height: 1.6,
+                            ),
+                          );
                         }
                         return _card(_items[i - 1]);
                       },
@@ -94,44 +199,118 @@ class _ThreadsScreenState extends State<ThreadsScreen> {
     final last = t['lastMessage'] as Map?;
     final code = t['studentCode'] as String?;
     final teacher = (t['teacher'] as Map?)?['fullName'] as String?;
+    final partners = ((t['partners'] as List?) ?? []).cast<Map>();
     final pending = t['pendingConfirmation'] == true;
     final done = t['status'] == 'COMPLETED';
     final lastText = last == null
         ? null
         : (last['text'] as String?)?.trim().isNotEmpty == true
-            ? (last['text'] as String).length > 40 ? '${(last['text'] as String).substring(0, 40)}…' : last['text'] as String
-            : switch (last['kind']) { 'ZOOM_LINK' => 'رابط الحصة', 'APPOINTMENT' => 'موعد', _ => 'ملف' };
+        ? (last['text'] as String).length > 40
+              ? '${(last['text'] as String).substring(0, 40)}…'
+              : last['text'] as String
+        : switch (last['kind']) {
+            'ZOOM_LINK' => 'رابط الحصة',
+            'APPOINTMENT' => 'موعد',
+            _ => 'ملف',
+          };
     return GestureDetector(
       onTap: () => _open(t),
       child: YaCard(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Row(children: [
-            Expanded(child: Text('${t['fullName']}${code != null ? '  ($code)' : ''}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
-            if (pending) Pill.bad('⏰ بانتظار التأكيد') else if (done) const Pill('مكتمل', bg: Color(0xFFEDF1F3), fg: Ya.muted),
-          ]),
-          if (teacher != null) Text('المعلم: $teacher', style: const TextStyle(color: Ya.muted, fontSize: 13)),
-          const SizedBox(height: 8),
-          Segs((p['done'] ?? 0) as int, (p['total'] ?? 0) as int),
-          const SizedBox(height: 4),
-          Text('${p['done'] ?? 0} من ${p['total'] ?? 0} حصة', style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
-          const SizedBox(height: 6),
-          if (next != null) ...[
-            Text('🕒 الموعد القادم', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            Text('السعودية: ${(next['display'] as Map)['saudi']}', style: const TextStyle(fontSize: 13)),
-            Text('مصر: ${(next['display'] as Map)['egypt']}', style: const TextStyle(fontSize: 13, color: Ya.muted)),
-          ] else
-            const Text('لا يوجد موعد محدد', style: TextStyle(color: Ya.muted, fontSize: 13)),
-          if (lastText != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('آخر رسالة: $lastText', style: const TextStyle(color: Ya.muted, fontSize: 12.5))),
-          if (context.read<AuthState>().isSupervisor && t['subscriptionId'] != null)
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: TextButton(
-                style: TextButton.styleFrom(foregroundColor: Colors.red.shade700),
-                onPressed: () => _remove(t),
-                child: const Text('إزالة من الكورس'),
-              ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${t['fullName']}${code != null ? '  ($code)' : ''}',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                    ),
+                  ),
+                ),
+                if (pending)
+                  Pill.bad('⏰ بانتظار التأكيد')
+                else if (done)
+                  const Pill('مكتمل', bg: Color(0xFFEDF1F3), fg: Ya.muted),
+              ],
             ),
-        ]),
+            if (teacher != null)
+              Text(
+                'المعلم: $teacher',
+                style: const TextStyle(color: Ya.muted, fontSize: 13),
+              ),
+            if (partners.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 5),
+                child: Text(
+                  'اشتراك مشترك مع: ${partners.map((partner) => partner['fullName']).join('، ')}',
+                  style: const TextStyle(
+                    color: Ya.strong,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Segs((p['done'] ?? 0) as int, (p['total'] ?? 0) as int),
+            const SizedBox(height: 4),
+            Text(
+              '${p['done'] ?? 0} من ${p['total'] ?? 0} حصة',
+              style: const TextStyle(color: Ya.muted, fontSize: 12.5),
+            ),
+            const SizedBox(height: 6),
+            if (next != null) ...[
+              Text(
+                '🕒 الموعد القادم',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              Text(
+                'السعودية: ${(next['display'] as Map)['saudi']}',
+                style: const TextStyle(fontSize: 13),
+              ),
+              Text(
+                'مصر: ${(next['display'] as Map)['egypt']}',
+                style: const TextStyle(fontSize: 13, color: Ya.muted),
+              ),
+            ] else
+              const Text(
+                'لا يوجد موعد محدد',
+                style: TextStyle(color: Ya.muted, fontSize: 13),
+              ),
+            if (lastText != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'آخر رسالة: $lastText',
+                  style: const TextStyle(color: Ya.muted, fontSize: 12.5),
+                ),
+              ),
+            if (context.read<AuthState>().isSupervisor &&
+                t['subscriptionId'] != null)
+              Wrap(
+                spacing: 4,
+                children: [
+                  TextButton.icon(
+                    icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+                    label: const Text('إضافة شريك للاشتراك'),
+                    onPressed: () => _addPartner(t),
+                  ),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.red.shade700,
+                    ),
+                    onPressed: () => _remove(t),
+                    child: const Text('إزالة من الكورس'),
+                  ),
+                ],
+              ),
+          ],
+        ),
       ),
     );
   }

@@ -11,6 +11,7 @@ import '../core/widgets.dart';
 import '../core/auth.dart';
 import '../core/sheet.dart';
 import 'tour.dart';
+import 'teacher_accounting.dart';
 
 /// Session log (teacher: her own, supervisor: everyone's).
 class LogPage extends StatefulWidget {
@@ -74,12 +75,16 @@ class _LogPageState extends State<LogPage> {
     Widget stat(String v, String l) => Expanded(child: Column(children: [Text(v, style: Ya.display(size: 28, color: Ya.strong)), Text(l, style: const TextStyle(fontSize: 12.5, color: Ya.muted))]));
     return YaPage(
       title: 'سجل الحصص',
-      actions: [IconButton(tooltip: 'تصدير CSV', icon: const Icon(Icons.download_rounded), onPressed: _export)],
+      actions: [if (sup) IconButton(tooltip: 'حساب الحصص', icon: const Icon(Icons.account_balance_wallet_outlined), onPressed: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const TeacherAccountingPage()))), IconButton(tooltip: 'تصدير CSV', icon: const Icon(Icons.download_rounded), onPressed: _export)],
       child: _loading
           ? const Center(child: CircularProgressIndicator(color: Ya.teal))
           : RefreshIndicator(
               onRefresh: _load,
               child: ListView(padding: const EdgeInsets.all(16), children: [
+                if (sup) ...[
+                  YaCard(key: Tour.k('teacher_accounting'), onTap: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const TeacherAccountingPage())), child: const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.account_balance_wallet_outlined, color: Ya.teal), title: Text('حساب حصص المعلمات'), subtitle: Text('المنجز والمدفوع والمتبقي لكل كورس'), trailing: Icon(Icons.chevron_left_rounded))),
+                  const SizedBox(height: 12),
+                ],
                 SizedBox(
                   height: 38,
                   child: ListView(key: Tour.k('logfilter'), scrollDirection: Axis.horizontal, children: [
@@ -112,7 +117,7 @@ class _LogPageState extends State<LogPage> {
                           e['held'] == true ? Pill.ok('تمت') : Pill.bad('لم تتم'),
                         ]),
                         const SizedBox(height: 4),
-                        Text('${(e['by'] as Map?)?['fullName'] ?? ''} · العدّاد ${e['num']} من ${e['total']}', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+                        Text('${(e['teacher'] as Map?)?['fullName'] ?? 'المعلمة غير محددة'} · العدّاد ${e['num']} من ${e['total']}', style: const TextStyle(color: Ya.muted, fontSize: 13)),
                         Row(children: [
                           Expanded(child: Text(fdt(DateTime.parse('${e['createdAt']}').toLocal()), style: const TextStyle(color: Ya.muted, fontSize: 12.5))),
                           if (sup) TextButton(onPressed: () => _delete(e['id'] as String), child: const Text('حذف', style: TextStyle(color: Ya.danger))),

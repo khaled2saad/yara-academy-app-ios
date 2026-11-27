@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api.dart';
 import 'config.dart';
 import 'push.dart';
+import 'web_ring.dart';
 
 enum AuthStatus { booting, offline, signedOut, signedIn }
 
@@ -40,19 +41,22 @@ class AuthState extends ChangeNotifier with WidgetsBindingObserver {
 
   static String _randomId() {
     final r = Random.secure();
-    return List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+    return List.generate(
+      16,
+      (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
   }
 
   Future<void> boot() async {
     final prefs = await SharedPreferences.getInstance();
     var dev = prefs.getString('ya_dev');
     if (dev == null) {
-      dev = _randomId();
+      dev = legacyWebDeviceId() ?? _randomId();
       await prefs.setString('ya_dev', dev);
     }
     api.deviceId = dev;
 
-    final saved = await _readToken();
+    final saved = await _readToken() ?? legacyWebToken();
     if (saved == null) {
       status = AuthStatus.signedOut;
       notifyListeners();
@@ -95,7 +99,9 @@ class AuthState extends ChangeNotifier with WidgetsBindingObserver {
       }
     } catch (_) {
       final p = await SharedPreferences.getInstance();
-      t == null ? await p.remove('ya_token_fb') : await p.setString('ya_token_fb', t);
+      t == null
+          ? await p.remove('ya_token_fb')
+          : await p.setString('ya_token_fb', t);
     }
   }
 
@@ -122,7 +128,10 @@ class AuthState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Creates a student account; the server returns the student's login code in `user.studentCode`.
   Future<void> register(String fullName) async {
-    final r = await api.post('/auth/student/register', body: {'fullName': fullName.trim()});
+    final r = await api.post(
+      '/auth/student/register',
+      body: {'fullName': fullName.trim()},
+    );
     _accept(r);
   }
 
@@ -152,11 +161,15 @@ class AuthState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  Future<void> _clear() => _writeToken(null);
+  Future<void> _clear() async {
+    clearLegacyWebToken();
+    await _writeToken(null);
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && DateTime.now().difference(_lastRefresh) > const Duration(hours: 1)) {
+    if (state == AppLifecycleState.resumed &&
+        DateTime.now().difference(_lastRefresh) > const Duration(hours: 1)) {
       refresh();
     }
   }

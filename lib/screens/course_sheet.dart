@@ -49,12 +49,13 @@ class _CourseSheetState extends State<CourseSheet> {
 
   Course get c => widget.c;
 
-bool get _free => context.read<AuthState>().freeAccess;
+  bool get _free => context.read<AuthState>().freeAccess;
 
   List<_Opt> get _opts => [
-        if (c.trialAvailable && !c.trialUsed) const _Opt('TRIAL', '🎁', 'جلسة تجريبية', 'حصة واحدة تجرّب فيها المعلم'),
+        if (c.trialAvailable && !c.trialUsed)
+          _Opt('TRIAL', '🎁', 'جلسة تجريبية', _free ? 'حصة واحدة تجرّب فيها المعلم' : 'حصة واحدة مجانية تجرّب فيها المعلم'),
         if (c.packagesAvailable && c.totalSessions > 1)
-          _Opt('PACKAGE', '📦', 'باقة حصص', _free || c.pricePerSession == 0 ? 'اختر العدد اللي يناسبك' : '${_money(c.pricePerSession)} ${_cur(c.currency)} للحصة، اختر العدد اللي يناسبك'),
+          _Opt('PACKAGE', '📦', 'باقة حصص', _free ? 'اختر العدد اللي يناسبك' : (c.pricePerSession == 0 ? 'مجانية، اختر العدد اللي يناسبك' : '${_money(c.pricePerSession)} ${_cur(c.currency)} للحصة، اختر العدد اللي يناسبك')),
         _Opt('FULL', '🎓', 'الكورس كامل', '${c.totalSessions} حصة'),
       ];
 
@@ -81,11 +82,12 @@ bool get _free => context.read<AuthState>().freeAccess;
         if (_type == 'PACKAGE') 'sessions': _n,
       });
       // The request goes to the supervisor right away: no "awaiting payment" step, no confirmation.
-      final id = (r['subscription'] as Map)['id'] as String;
-      if ((r['subscription'] as Map)['status'] == 'AWAITING_PAYMENT') await api.post('/subscriptions/$id/submit');
+      final sub = r['subscription'] as Map;
+      final id = sub['id'] as String;
+      if (sub['status'] == 'AWAITING_PAYMENT') await api.post('/subscriptions/$id/submit');
       final url = r['whatsappUrl'] as String?;
       if (mounted) {
-        toast(context, 'تم إرسال طلبك للمشرف 🎉');
+        toast(context, sub['status'] == 'ACTIVE' ? 'اتفعل الكورس، يلا ابدأ! 🎉' : 'تم إرسال طلبك للمشرف 🎉');
         Navigator.pop(context);
       }
       if (url != null) await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
@@ -162,13 +164,13 @@ bool get _free => context.read<AuthState>().freeAccess;
       Tour.wrap('bk_opts', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [for (final o in _opts) ...[_optTile(o), const SizedBox(height: 10)]])),
       const SizedBox(height: 2),
       Tour.wrap('bk_btn', GradButton(
-        label: _free ? '📩 إرسال طلب الاشتراك' : (_price == 0 ? '💬 احجز الجلسة المجانية عبر واتساب' : '💬 احجز عبر واتساب · ${_money(_price)} ${_cur(c.currency)}'),
+        label: _free ? '🎉 ابدأ الكورس الآن' : (_price == 0 ? '💬 احجز الجلسة المجانية عبر واتساب' : '💬 احجز عبر واتساب · ${_money(_price)} ${_cur(c.currency)}'),
         gradient: Ya.waGradient,
         busy: _busy,
         onPressed: _busy ? null : _book,
       )),
       const SizedBox(height: 8),
-      Text(_free ? 'هيوصل طلبك للمشرف على طول.' : 'يوصل طلبك للمشرف فوراً، ويفتح لك واتساب برسالة جاهزة للدفع.', textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted, fontSize: 13)),
+      Text(_free ? 'هيتفعل على طول، من غير أي خطوات تانية.' : 'يوصل طلبك للمشرف فوراً، ويفتح لك واتساب برسالة جاهزة للدفع.', textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted, fontSize: 13)),
     ]);
   }
 
