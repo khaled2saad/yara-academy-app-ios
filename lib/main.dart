@@ -35,7 +35,7 @@ class YaraApp extends StatefulWidget {
   State<YaraApp> createState() => _YaraAppState();
 }
 
-class _YaraAppState extends State<YaraApp> {
+class _YaraAppState extends State<YaraApp> with WidgetsBindingObserver {
   final _navigator = GlobalKey<NavigatorState>();
   StreamSubscription<({Map<String, dynamic> data, bool foreground})>? _alerts;
   bool _showingAlert = false;
@@ -45,6 +45,7 @@ class _YaraAppState extends State<YaraApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _alerts = Push.lessonAlerts.listen(
       (event) => _showLessonAlert(event.data, event.foreground),
     );
@@ -125,7 +126,19 @@ class _YaraAppState extends State<YaraApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        mounted &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        context.read<AuthState>().status == AuthStatus.signedIn) {
+      unawaited(Push.register(context.read<Api>()));
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _alerts?.cancel();
     super.dispose();
   }

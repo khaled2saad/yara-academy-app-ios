@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'apple_push_token.dart';
 import 'lesson_alert.dart';
 
 @pragma('vm:entry-point')
@@ -66,6 +67,10 @@ class Push {
   static bool _tried = false;
   static String? _token;
   static StreamSubscription<String>? _refreshSub;
+  static Timer? _registrationRetry;
+  static Api? _activeApi;
+  static bool _registering = false;
+  static int _registrationEpoch = 0;
   static final _lessonAlerts =
       StreamController<
         ({Map<String, dynamic> data, bool foreground})
@@ -132,30 +137,92 @@ class Push {
 
   /// Call after the user is signed in.
   static Future<void> register(Api api) async {
+    if (api.token == null) return;
+    _activeApi = api;
+    if (_registering) return;
+    _registering = true;
+    _registrationRetry?.cancel();
+    final epoch = _registrationEpoch;
+    bool isActive() =>
+        epoch == _registrationEpoch &&
+        identical(_activeApi, api) &&
+        api.token != null;
+    var retry = false;
     try {
-      if (!await _init()) return;
+      if (!await _init()) {
+        retry = true;
+        return;
+      }
+      if (!isActive()) return;
       final fm = FirebaseMessaging.instance;
-      await fm.requestPermission();
+      final settings = await fm.requestPermission();
+      if (!isActive() ||
+          settings.authorizationStatus == AuthorizationStatus.denied) {
+        return;
+      }
+      // Listen before requesting the initial token so a late native callback
+      // cannot be lost when APNs has not finished registering yet.
+      _refreshSub ??= fm.onTokenRefresh.listen((nt) async {
+        final currentApi = _activeApi;
+        final currentEpoch = _registrationEpoch;
+        if (currentApi == null || currentApi.token == null) return;
+        _token = nt;
+        if (!await _send(currentApi, nt) &&
+            currentEpoch == _registrationEpoch &&
+            identical(currentApi, _activeApi)) {
+          _retryRegistration(currentApi);
+        }
+      });
+      if (!kIsWeb &&
+          _ios &&
+          !await waitForApplePushToken(
+            readToken: fm.getAPNSToken,
+            isActive: isActive,
+          )) {
+        debugPrint('YaraPush Apple token pending; registration will retry');
+        retry = true;
+        return;
+      }
+      if (!isActive()) return;
       final t = await fm.getToken(
         vapidKey: kIsWeb ? _vapid : null,
         serviceWorkerScriptPath: kIsWeb ? '/firebase-messaging-sw.js' : null,
       );
-      if (t == null) return;
+      if (!isActive()) return;
+      if (t == null) {
+        retry = true;
+        return;
+      }
       _token = t;
-      await _send(api, t);
-      _refreshSub ??= fm.onTokenRefresh.listen((nt) {
-        _token = nt;
-        _send(api, nt);
-      });
+      retry = !await _send(api, t);
     } catch (error) {
       debugPrint('YaraPush registration failed: $error');
+      retry = true;
       // never let push break login
+    } finally {
+      _registering = false;
+      if (retry && isActive()) _retryRegistration(api);
+      // A new login may have arrived while the previous user's attempt was
+      // waiting for APNs. Start the new registration after that attempt exits.
+      if (epoch != _registrationEpoch && _activeApi != null) {
+        unawaited(register(_activeApi!));
+      }
     }
   }
 
-  static Future<void> _send(Api api, String t) async {
+  static void _retryRegistration(Api api) {
+    _registrationRetry?.cancel();
+    if (!identical(api, _activeApi) || api.token == null) return;
+    _registrationRetry = Timer(const Duration(seconds: 30), () {
+      if (identical(api, _activeApi) && api.token != null) {
+        unawaited(register(api));
+      }
+    });
+  }
+
+  static Future<bool> _send(Api api, String t) async {
     try {
-      if (api.token == null) return;
+      if (api.token == null) return false;
       await api.post(
         '/push/token',
         body: {
@@ -168,15 +235,23 @@ class Push {
         },
       );
       debugPrint('YaraPush device registered');
+      return true;
     } catch (error) {
       debugPrint('YaraPush device registration request failed: $error');
+      return false;
     }
   }
 
   /// Call before signing out so the next person on this phone doesn't get this user's notifications.
   static Future<void> unregister(Api api) async {
+    _registrationEpoch++;
+    _activeApi = null;
+    _registrationRetry?.cancel();
+    await _refreshSub?.cancel();
+    _refreshSub = null;
     await LessonAlert.cancelRinging();
     final t = _token;
+    _token = null;
     if (t == null || api.token == null) return;
     try {
       await api.request('DELETE', '/push/token', body: {'token': t});
